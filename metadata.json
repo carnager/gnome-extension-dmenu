@@ -1,0 +1,8 @@
+{
+    "uuid": "dmenu-gnome@carnager.github.io",
+    "name": "dmenu-gnome",
+    "description": "Provides a dmenu-like interface that can be used for scripting. Listens on DBus for requests.",
+    "shell-version": ["45", "46", "47", "48"],
+    "url": "https://github.com/carnager/gnome-extension-dmenu",
+    "version": 1
+}
