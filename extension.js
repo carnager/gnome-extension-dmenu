@@ -3,7 +3,7 @@
  *
  * Main logic for the dmenu-gnome GNOME Shell Extension.
  *
- * Author: Gemini
+ * Author: Rasmus Steinke
  */
 
 import Gio from 'gi://Gio';
@@ -21,13 +21,13 @@ import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 // This is the interface that the helper script will talk to.
 const DBUS_INTERFACE = `
 <node>
-    <interface name="com.gemini.dmenu">
+    <interface name="org.gnome.Shell.Extensions.DmenuGnome">
         <method name="Show">
             <arg type="as" name="items" direction="in"/>
             <arg type="s" name="prompt" direction="in"/>
         </method>
         <signal name="ItemSelected">
-            <arg type="s" name="selected_item"/>
+            <arg type="as" name="selected_items"/>
         </signal>
         <signal name="Cancelled"/>
     </interface>
@@ -44,9 +44,9 @@ class DmenuService {
         this._extension.show(items, prompt);
     }
 
-    // Signal to the helper script that an item was selected
-    emitItemSelected(item) {
-        this._dbusImpl.emit_signal('ItemSelected', GLib.Variant.new('(s)', [item]));
+    // Signal to the helper script that items were selected
+    emitItemSelected(items) {
+        this._dbusImpl.emit_signal('ItemSelected', GLib.Variant.new('(as)', [items]));
     }
 
     // Signal that the user cancelled the operation (e.g., pressed Escape)
@@ -55,8 +55,8 @@ class DmenuService {
     }
 
     export() {
-        this._dbusImpl.export(Gio.DBus.session, '/com/gemini/dmenu');
-        Gio.DBus.session.own_name('com.gemini.dmenu', Gio.BusNameOwnerFlags.NONE, null, null);
+        this._dbusImpl.export(Gio.DBus.session, '/org/gnome/Shell/Extensions/DmenuGnome');
+        Gio.DBus.session.own_name('org.gnome.Shell.Extensions.DmenuGnome', Gio.BusNameOwnerFlags.NONE, null, null);
     }
 
     unexport() {
@@ -120,11 +120,15 @@ class DmenuUI {
         this._items = [];
         this._visible_items = [];
         this._selected_index = 0;
+        this._selected_items = new Set();
         this._filter_timeout = null;
+        this._scroll_start_index = 0;
+        this._items_per_page = 20; // Number of DOM elements to render
     }
 
     show(items, prompt) {
         this._items = items;
+        this._selected_items.clear();
         this.prompt_label.set_text(prompt + " ");
         this.entry.set_text('');
         this._selected_index = 0;
@@ -159,8 +163,8 @@ class DmenuUI {
             GLib.source_remove(this._filter_timeout);
         }
         
-        // Set a short delay to debounce rapid typing
-        this._filter_timeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
+        // Set a longer delay to debounce rapid typing and improve performance
+        this._filter_timeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 300, () => {
             this._selected_index = 0;
             this._updateResults();
             this._filter_timeout = null;
@@ -180,24 +184,85 @@ class DmenuUI {
         } else if (symbol === Clutter.KEY_Up || (modifiers & Clutter.ModifierType.CONTROL_MASK && symbol === Clutter.KEY_k)) {
             if (this._visible_items.length > 0) {
                 this._selected_index = Math.max(0, this._selected_index - 1);
-                this._updateSelection();
+                this._updateScrollWindow();
+                this._renderVisibleItems();
             }
             return Clutter.EVENT_STOP;
         } else if (symbol === Clutter.KEY_Down || (modifiers & Clutter.ModifierType.CONTROL_MASK && symbol === Clutter.KEY_j)) {
             if (this._visible_items.length > 0) {
                 this._selected_index = Math.min(this._visible_items.length - 1, this._selected_index + 1);
-                this._updateSelection();
+                this._updateScrollWindow();
+                this._renderVisibleItems();
             }
             return Clutter.EVENT_STOP;
-        } else if (symbol === Clutter.KEY_Tab) {
-            // Tab cycles through items
+        } else if (symbol === Clutter.KEY_Page_Up) {
             if (this._visible_items.length > 0) {
-                this._selected_index = (this._selected_index + 1) % this._visible_items.length;
-                this._updateSelection();
+                const pageSize = this._items_per_page;
+                this._selected_index = Math.max(0, this._selected_index - pageSize);
+                this._updateScrollWindow();
+                this._renderVisibleItems();
+            }
+            return Clutter.EVENT_STOP;
+        } else if (symbol === Clutter.KEY_Page_Down) {
+            if (this._visible_items.length > 0) {
+                const pageSize = this._items_per_page;
+                this._selected_index = Math.min(this._visible_items.length - 1, this._selected_index + pageSize);
+                this._updateScrollWindow();
+                this._renderVisibleItems();
+            }
+            return Clutter.EVENT_STOP;
+        } else if (symbol === Clutter.KEY_Home || symbol === Clutter.KEY_Begin || 
+                   (modifiers & Clutter.ModifierType.CONTROL_MASK && symbol === Clutter.KEY_a)) {
+            if (this._visible_items.length > 0) {
+                this._selected_index = 0;
+                this._updateScrollWindow();
+                this._renderVisibleItems();
+            }
+            return Clutter.EVENT_STOP;
+        } else if (symbol === Clutter.KEY_End || 
+                   (modifiers & Clutter.ModifierType.CONTROL_MASK && symbol === Clutter.KEY_e)) {
+            if (this._visible_items.length > 0) {
+                this._selected_index = this._visible_items.length - 1;
+                this._updateScrollWindow();
+                this._renderVisibleItems();
+            }
+            return Clutter.EVENT_STOP;
+        } else if (symbol === Clutter.KEY_Tab || (modifiers & Clutter.ModifierType.CONTROL_MASK && symbol === Clutter.KEY_space)) {
+            // Tab toggles selection and auto-advances, Ctrl+Space toggles without advancing
+            if (this._visible_items.length > 0 && this._selected_index < this._visible_items.length) {
+                const currentItem = this._visible_items[this._selected_index];
+                if (this._selected_items.has(currentItem)) {
+                    this._selected_items.delete(currentItem);
+                } else {
+                    this._selected_items.add(currentItem);
+                }
+                
+                // Auto-advance for Tab, but not for Ctrl+Space
+                if (symbol === Clutter.KEY_Tab) {
+                    this._selected_index = Math.min(this._visible_items.length - 1, this._selected_index + 1);
+                }
+                
+                this._updateScrollWindow();
+                this._renderVisibleItems();
             }
             return Clutter.EVENT_STOP;
         } else if (symbol === Clutter.KEY_Return || symbol === Clutter.KEY_KP_Enter) {
-            this._onActivate();
+            if (modifiers & Clutter.ModifierType.SHIFT_MASK) {
+                // Shift+Return toggles selection and moves to next item
+                if (this._visible_items.length > 0 && this._selected_index < this._visible_items.length) {
+                    const currentItem = this._visible_items[this._selected_index];
+                    if (this._selected_items.has(currentItem)) {
+                        this._selected_items.delete(currentItem);
+                    } else {
+                        this._selected_items.add(currentItem);
+                    }
+                    this._selected_index = Math.min(this._visible_items.length - 1, this._selected_index + 1);
+                    this._updateScrollWindow();
+                    this._renderVisibleItems();
+                }
+            } else {
+                this._onActivate();
+            }
             return Clutter.EVENT_STOP;
         }
         return Clutter.EVENT_PROPAGATE;
@@ -205,28 +270,33 @@ class DmenuUI {
 
     // Handle when user presses Enter
     _onActivate() {
-        if (this._visible_items.length > 0 && this._selected_index < this._visible_items.length) {
-            const selectedItem = this._visible_items[this._selected_index];
-            this._service.emitItemSelected(selectedItem);
+        let itemsToReturn = [];
+        
+        if (this._selected_items.size > 0) {
+            // Return all selected items
+            itemsToReturn = Array.from(this._selected_items);
+        } else if (this._visible_items.length > 0 && this._selected_index < this._visible_items.length) {
+            // If no items selected, return the currently highlighted item
+            itemsToReturn = [this._visible_items[this._selected_index]];
+        }
+        
+        if (itemsToReturn.length > 0) {
+            this._service.emitItemSelected(itemsToReturn);
             this.hide();
         }
     }
 
     // Redraw the results list based on the current filter
     _updateResults() {
-        this.results_box.remove_all_children();
         const filter = this.entry.get_text().trim().toLowerCase();
         
-        // Optimize filtering and limit results for performance
+        // Build full filtered list (no limit)
         this._visible_items = [];
-        const MAX_RESULTS = 50; // Limit visible results for performance
         
         // Tokenize filter into words for multi-word matching
         const filterTokens = filter.split(/\s+/).filter(token => token.length > 0);
         
         for (const item of this._items) {
-            if (this._visible_items.length >= MAX_RESULTS) break;
-            
             const itemLower = item.toLowerCase();
             
             // If no filter, show all items
@@ -243,38 +313,89 @@ class DmenuUI {
             }
         }
 
-        // Create UI elements only for visible items
-        for (const item of this._visible_items) {
-            const label = new St.Label({ text: item, style_class: 'dmenu-result-item', x_align: Clutter.ActorAlign.FILL });
-            this.results_box.add_child(label);
+        // Update scroll position to keep selection visible
+        this._updateScrollWindow();
+        this._renderVisibleItems();
+    }
+    
+    // Update which items should be rendered based on scroll position
+    _updateScrollWindow() {
+        if (this._visible_items.length === 0) {
+            this._scroll_start_index = 0;
+            return;
+        }
+        
+        // Keep current selection in view
+        const buffer = Math.floor(this._items_per_page / 4); // Buffer for smooth scrolling
+        
+        if (this._selected_index < this._scroll_start_index + buffer) {
+            this._scroll_start_index = Math.max(0, this._selected_index - buffer);
+        } else if (this._selected_index >= this._scroll_start_index + this._items_per_page - buffer) {
+            this._scroll_start_index = Math.min(
+                this._visible_items.length - this._items_per_page,
+                this._selected_index - this._items_per_page + buffer + 1
+            );
+        }
+        
+        this._scroll_start_index = Math.max(0, this._scroll_start_index);
+    }
+    
+    // Render only the currently visible items
+    _renderVisibleItems() {
+        this.results_box.remove_all_children();
+        
+        const end_index = Math.min(
+            this._scroll_start_index + this._items_per_page,
+            this._visible_items.length
+        );
+        
+        for (let i = this._scroll_start_index; i < end_index; i++) {
+            const item = this._visible_items[i];
+            const itemContainer = new St.BoxLayout({ style_class: 'dmenu-result-item', vertical: false });
+            
+            // Add selection indicator
+            const indicator = new St.Label({
+                text: this._selected_items.has(item) ? '• ' : '  ',
+                style_class: 'dmenu-selection-indicator'
+            });
+            
+            const label = new St.Label({ text: item, x_align: Clutter.ActorAlign.FILL });
+            
+            itemContainer.add_child(indicator);
+            itemContainer.add_child(label);
+            this.results_box.add_child(itemContainer);
         }
         this._updateSelection();
     }
     
-    // Highlight the currently selected item
+    // Highlight the currently selected item and show multi-selected items
     _updateSelection() {
         const children = this.results_box.get_children();
+        
         for (let i = 0; i < children.length; i++) {
-            if (i === this._selected_index) {
+            const actualIndex = this._scroll_start_index + i;
+            const item = this._visible_items[actualIndex];
+            
+            // Remove all styling classes first
+            children[i].remove_style_class_name('selected');
+            children[i].remove_style_class_name('multi-selected');
+            
+            // Update the selection indicator
+            const indicator = children[i].get_first_child();
+            indicator.set_text(this._selected_items.has(item) ? '• ' : '  ');
+            
+            // Apply appropriate styling
+            if (this._selected_items.has(item)) {
+                children[i].add_style_class_name('multi-selected');
+            }
+            
+            // Highlight if this is the currently selected item
+            if (actualIndex === this._selected_index) {
                 children[i].add_style_class_name('selected');
-                // Ensure the selected item is visible in the scroll view
-                const itemY = children[i].get_allocation_box().y1;
-                const itemHeight = children[i].get_height();
-                const scrollViewHeight = this.results_container.get_height();
-                const scrollAdjustment = this.results_container.get_vadjustment();
-                const currentScrollValue = scrollAdjustment.get_value();
-
-                if (itemY < currentScrollValue) {
-                    scrollAdjustment.set_value(itemY);
-                } else if (itemY + itemHeight > currentScrollValue + scrollViewHeight) {
-                    scrollAdjustment.set_value(itemY + itemHeight - scrollViewHeight);
-                }
-
-            } else {
-                children[i].remove_style_class_name('selected');
             }
         }
     }
+    
 }
 
 
@@ -296,3 +417,4 @@ export default class DmenuExtension extends Extension {
         this._ui.show(items, prompt || '>');
     }
 }
+

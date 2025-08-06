@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+#
+# dmenu-gnome
+#
+# Helper script to interact with the dmenu-gnome GNOME Shell extension.
+# Reads from stdin, sends to the extension via DBus, waits for a selection,
+# and prints the result to stdout.
+#
+# Author: Rasmus Steinke
+
+import sys
+import subprocess
+import tempfile
+import os
+
+def main():
+    # Read all lines from standard input
+    items = [line.strip() for line in sys.stdin]
+    
+    # Get the prompt from command line arguments, if provided
+    prompt = ">"
+    if len(sys.argv) > 1:
+        prompt = sys.argv[1]
+
+    # Create a temporary file to store the items
+    with tempfile.NamedTemporaryFile(mode='w', delete=False) as temp_file:
+        for item in items:
+            temp_file.write(item + '\n')
+        temp_file_path = temp_file.name
+
+    try:
+        # Run the actual dmenu implementation in a subprocess with all output suppressed
+        result = subprocess.run([
+            sys.executable, '-c', f'''
+import sys
+import gi
+import signal
+import os
+
+gi.require_version('Gio', '2.0')
+from gi.repository import Gio, GLib
+
+# DBus Configuration
+BUS_NAME = 'org.gnome.Shell.Extensions.DmenuGnome'
+OBJECT_PATH = '/org/gnome/Shell/Extensions/DmenuGnome'
+INTERFACE_NAME = 'org.gnome.Shell.Extensions.DmenuGnome'
+
+# Read items from temp file
+with open("{temp_file_path}", "r") as f:
+    items = [line.strip() for line in f if line.strip()]
+
+prompt = "{prompt}"
+result = None
+loop = GLib.MainLoop()
+
+def on_item_selected(connection, sender_name, object_path, interface_name, signal_name, parameters):
+    global result
+    selected_items = parameters.unpack()[0]
+    result = selected_items
+    loop.quit()
+
+def on_cancelled(connection, sender_name, object_path, interface_name, signal_name, parameters):
+    loop.quit()
+
+def on_proxy_created(source_object, res, user_data):
+    try:
+        proxy = Gio.DBusProxy.new_for_bus_finish(res)
+        proxy.call_sync('Show', GLib.Variant('(ass)', (items, prompt)), Gio.DBusCallFlags.NONE, -1, None)
+    except Exception:
+        loop.quit()
+
+try:
+    bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+    bus.signal_subscribe(None, INTERFACE_NAME, 'ItemSelected', OBJECT_PATH, None, Gio.DBusSignalFlags.NONE, on_item_selected)
+    bus.signal_subscribe(None, INTERFACE_NAME, 'Cancelled', OBJECT_PATH, None, Gio.DBusSignalFlags.NONE, on_cancelled)
+    signal.signal(signal.SIGINT, lambda signum, frame: loop.quit())
+    
+    Gio.DBusProxy.new_for_bus(Gio.BusType.SESSION, Gio.DBusProxyFlags.NONE, None, BUS_NAME, OBJECT_PATH, INTERFACE_NAME, None, on_proxy_created, None)
+    
+    loop.run()
+    
+    if result is not None:
+        if isinstance(result, list):
+            for item in result:
+                print(item)
+        else:
+            print(result)
+except Exception:
+    pass
+'''
+        ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env={**os.environ, 'G_MESSAGES_DEBUG': '', 'G_DEBUG': ''})
+        
+        # Output only the result, suppress any stderr
+        if result.stdout:
+            print(result.stdout.strip())
+            
+    finally:
+        # Clean up temp file
+        try:
+            os.unlink(temp_file_path)
+        except OSError:
+            pass
+
+if __name__ == '__main__':
+    main()

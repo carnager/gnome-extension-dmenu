@@ -3,7 +3,7 @@
  *
  * CSS for the dmenu-gnome GNOME Shell Extension.
  *
- * Author: Gemini
+ * Author: Rasmus Steinke
  */
 
 .dmenu-container {
@@ -69,4 +69,17 @@
     background-color: #5294e2; /* Standard GNOME selection color */
     color: #ffffff;
     font-weight: bold;
+}
+
+.dmenu-result-item.multi-selected {
+    background-color: rgba(82, 148, 226, 0.4); /* Semi-transparent selection */
+    color: #ffffff;
+    border-left: 3px solid #5294e2;
+}
+
+.dmenu-selection-indicator {
+    color: #5294e2;
+    font-weight: bold;
+    font-family: monospace !important;
+    padding-right: 8px;
 }
