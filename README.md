@@ -14,3 +14,6 @@ Because gnome does not support the layer-shell protocol like any other sensible 
 foo=$(ls -1 | $HOME/.local/share/gnome-shell/extensions/dmenu-gnome@carnager.github.io/dmenu-gnome)
 echo "${foo}"
 ```
+
+### Screenshot
+<img width="1920" height="1080" alt="grafik" src="https://github.com/user-attachments/assets/ae5ba4e7-36f2-494d-90a1-1c80a34ac1dd" />
