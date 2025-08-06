@@ -11,7 +11,7 @@ Because gnome does not support the layer-shell protocol like any other sensible 
 ### Example
 
 ```
-foo=$(ls -1 | $HOME/.local/share/gnome-shell/extensions/dmenu-gnome@carnager.github.io/dmenu-gnome)
+foo=$(ls -1 | $HOME/.local/share/gnome-shell/extensions/dmenu-gnome@carnager.github.io/dmenu-gnome.py)
 echo "${foo}"
 ```
 
